@@ -11,6 +11,20 @@ import logging
 from collections import deque,defaultdict
 from datetime import datetime
 
+DEFAULT_CONFIG = {
+    "file_size_limit": 30,
+    "max_requests_per_minute": 10,
+}
+def load_config_from_env():
+    """从环境变量加载配置，缺失时回退到默认值"""
+    config = DEFAULT_CONFIG.copy()  # 初始化为默认配置
+    if "FILE_SIZE_LIMIT" in os.environ:
+        config["file_size_limit"] = os.environ["FILE_SIZE_LIMIT"]
+    if "MAX_REQUESTS_PER_MINUTE" in os.environ:
+        config["max_requests_per_minute"] = int(os.environ["MAX_REQUESTS_PER_MINUTE"])
+    return config
+CONFIG = load_config_from_env()
+
 required_dirs = ['logs', 'images'] 
 for dir_name in required_dirs:
     os.makedirs(dir_name, exist_ok=True)
@@ -24,14 +38,15 @@ logging.basicConfig(
     ]
 )
 REQUEST_COUNTER = defaultdict(list)
-MAX_REQUESTS_PER_MINUTE = 10
 
+MAX_REQUESTS_PER_MINUTE = CONFIG['max_requests_per_minute']
+FILE_SIZE_LIMIT = CONFIG['file_size_limit']
 DOWNLOAD_CACHE = {}
-CACHE_EXPIRE = 60 * 5  # 5分钟缓存
-CACHE_QUEUE = deque(maxlen=100)  # 最多缓存100个
+CACHE_EXPIRE = 60 * 5 
+CACHE_QUEUE = deque(maxlen=100) 
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 20MB限制
+app.config['MAX_CONTENT_LENGTH'] = FILE_SIZE_LIMIT * 1024 * 1024
 
 class TurboTankGenerator:
     def __init__(self, img1, img2):
