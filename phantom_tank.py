@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template, send_file, abort, jsonify
+from flask import Flask, request, render_template, send_file, abort
 from PIL import Image
 import numpy as np
 import numba
