@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template, send_file
+from flask import Flask, request, render_template, send_file, abort, jsonify
 from PIL import Image
 import numpy as np
 import numba
@@ -7,14 +7,31 @@ import time
 import os
 import base64
 import uuid
-from collections import deque
+import logging
+from collections import deque,defaultdict
+from datetime import datetime
+
+required_dirs = ['logs', 'images'] 
+for dir_name in required_dirs:
+    os.makedirs(dir_name, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/app.log'),
+        logging.StreamHandler()
+    ]
+)
+REQUEST_COUNTER = defaultdict(list)
+MAX_REQUESTS_PER_MINUTE = 10
 
 DOWNLOAD_CACHE = {}
 CACHE_EXPIRE = 60 * 5  # 5分钟缓存
 CACHE_QUEUE = deque(maxlen=100)  # 最多缓存100个
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB限制
+app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 20MB限制
 
 class TurboTankGenerator:
     def __init__(self, img1, img2):
@@ -94,6 +111,23 @@ class TurboTankGenerator:
     def generate(self):
         result = self._core_algorithm(self.img_a, self.img_b)
         return Image.fromarray(result, 'RGBA')
+    
+@app.errorhandler(429)
+def handle_rate_limit(error):
+    return f"ERROR:{error.code}:{error.description}", error.code
+@app.before_request
+def check_rate_limit():
+    if request.path == '/generate':
+        client_ip = request.remote_addr
+        now = time.time()
+        # 清理超过1分钟的记录
+        REQUEST_COUNTER[client_ip] = [t for t in REQUEST_COUNTER[client_ip] if now - t < 60]
+        # 检查是否超限
+        if len(REQUEST_COUNTER[client_ip]) >= MAX_REQUESTS_PER_MINUTE:
+            app.logger.warning(f"IP {client_ip} 触发速率限制")
+            abort(429, description="请求过于频繁，请稍后再试")
+        # 记录本次请求时间
+        REQUEST_COUNTER[client_ip].append(now)
 
 @app.route('/')
 def index():
@@ -102,39 +136,69 @@ def index():
 @app.route('/generate', methods=['POST'])
 def generate():
     try:
-        file_a = request.files['image_a']
-        file_b = request.files['image_b']
+        file_a = request.files.get('image_a')
+        file_b = request.files.get('image_b')
+    
+        if not (file_a and file_b):
+            app.logger.error(f"缺少文件上传，客户端IP: {request.remote_addr}")
+            return "请选择两张图片进行生成", 400
+            
         if not (allowed_file(file_a.filename) and allowed_file(file_b.filename)):
+            app.logger.error(f"非法文件类型，客户端IP: {request.remote_addr}")
             return "仅支持JPEG/PNG图片", 400
-        
-        img_a = Image.open(io.BytesIO(file_a.read()))
-        img_b = Image.open(io.BytesIO(file_b.read()))
+
+        token = str(uuid.uuid4())
+        logging.info(f"开始处理请求，Token: {token}")
+
+        base_dirs = {
+            'sideA': os.path.join('images', token, 'sideA'),
+            'sideB': os.path.join('images', token, 'sideB'),
+            'output': os.path.join('images', token, 'output')
+        }
+        for d in base_dirs.values():
+            os.makedirs(d, exist_ok=True)
+
+        def save_upload(file_obj, side):
+            ext = file_obj.filename.rsplit('.', 1)[1].lower()
+            save_path = os.path.join(base_dirs[side], f'original.{ext}')
+            file_data = file_obj.read()
+            with open(save_path, 'wb') as f:
+                f.write(file_data)
+            return file_data
+
+        file_a_data = save_upload(file_a, 'sideA')
+        file_b_data = save_upload(file_b, 'sideB')
+
+        # 处理图像
+        img_a = Image.open(io.BytesIO(file_a_data))
+        img_b = Image.open(io.BytesIO(file_b_data))
         
         generator = TurboTankGenerator(img_a, img_b)
         result = generator.generate()
-        
-        preview = result.copy()
-        preview.thumbnail((400, 400), Image.Resampling.LANCZOS)
+
+        output_path = os.path.join(base_dirs['output'], 'result.png')
+        result.save(output_path, 'PNG', optimize=True, compress_level=3)
+
         preview_buf = io.BytesIO()
-        preview.save(preview_buf, 'PNG')
+        result.thumbnail((400, 400), Image.Resampling.LANCZOS)
+        result.save(preview_buf, 'PNG')
         preview_b64 = base64.b64encode(preview_buf.getvalue()).decode()
-        
-        # 保存
+
+        # 缓存下载文件
         output_buf = io.BytesIO()
-        result.save(output_buf, 'PNG', optimize=True, compress_level=3)
-        output_buf.seek(0)
-        
-        token = str(uuid.uuid4())
+        result.save(output_buf, 'PNG')
         DOWNLOAD_CACHE[token] = {
             'data': output_buf.getvalue(),
             'timestamp': time.time()
         }
         CACHE_QUEUE.append(token)
-        
+
+        app.logger.info(f"处理成功，Token: {token}")
         return {'preview': preview_b64, 'token': token}, 200
+
     except Exception as e:
-        app.logger.error(f"生成失败: {str(e)}")
-        return {'error': str(e)}, 500
+        app.logger.error(f"处理失败: {str(e)}")
+        return "处理失败: "+str(e), 500
 
 @app.route('/download/<token>')
 def download(token):
@@ -147,12 +211,13 @@ def download(token):
     data = DOWNLOAD_CACHE.get(token, {}).get('data')
     if not data:
         return "下载链接已过期", 404
-    
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    filename = f"phantom_tank_{timestamp}.png"
     return send_file(
         io.BytesIO(data),
         mimetype='image/png',
         as_attachment=True,
-        download_name='phantom_tank.png'
+        download_name=filename
     )
 
 def allowed_file(filename):
