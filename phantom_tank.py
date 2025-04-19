@@ -19,7 +19,7 @@ def load_config_from_env():
     """从环境变量加载配置，缺失时回退到默认值"""
     config = DEFAULT_CONFIG.copy()  # 初始化为默认配置
     if "FILE_SIZE_LIMIT" in os.environ:
-        config["file_size_limit"] = os.environ["FILE_SIZE_LIMIT"]
+        config["file_size_limit"] = int(os.environ["FILE_SIZE_LIMIT"]) 
     if "MAX_REQUESTS_PER_MINUTE" in os.environ:
         config["max_requests_per_minute"] = int(os.environ["MAX_REQUESTS_PER_MINUTE"])
     return config
@@ -132,7 +132,7 @@ def handle_rate_limit(error):
     return f"ERROR:{error.code}:{error.description}", error.code
 @app.before_request
 def check_rate_limit():
-    if request.path == '/generate':
+    if request.path == '/generate' or request.path.startswith('/download'):
         client_ip = request.remote_addr
         now = time.time()
         # 清理超过1分钟的记录
@@ -194,14 +194,15 @@ def generate():
         output_path = os.path.join(base_dirs['output'], 'result.png')
         result.save(output_path, 'PNG', optimize=True, compress_level=3)
 
+        preview_img = result.copy()  # 创建副本用于缩略图处理
+        preview_img.thumbnail((400, 400), Image.Resampling.LANCZOS)
         preview_buf = io.BytesIO()
-        result.thumbnail((400, 400), Image.Resampling.LANCZOS)
-        result.save(preview_buf, 'PNG')
+        preview_img.save(preview_buf, 'PNG')
         preview_b64 = base64.b64encode(preview_buf.getvalue()).decode()
 
-        # 缓存下载文件
+        # 缓存下载文件（直接使用原图）
         output_buf = io.BytesIO()
-        result.save(output_buf, 'PNG')
+        result.save(output_buf, 'PNG')  # 原图未被修改，直接保存
         DOWNLOAD_CACHE[token] = {
             'data': output_buf.getvalue(),
             'timestamp': time.time()

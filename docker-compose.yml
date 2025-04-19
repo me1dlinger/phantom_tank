@@ -10,3 +10,9 @@ services:
         #填写自己宿主机的路径
       - :path/logs:/app/python/logs
       - :path/images:/app/python/images
+    environment:
+      - TZ=Asia/Shanghai
+      #文件大小限制
+      - FILE_SIZE_LIMIT=30
+      #每分钟访问限制
+      - MAX_REQUESTS_PER_MINUTE=10
